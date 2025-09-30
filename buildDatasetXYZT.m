@@ -1,13 +1,6 @@
 function [ds, imds, pxds] = buildDatasetXYZT(img_4d, segmentation_data, label_idx, output_dir, dataset_name, imageSize, varargin)
-% Build grayscale normalized dataset for XYZT data with dual-label support
-% Inputs:
-% img_4d - 4D image data in XYZT format [height, width, num_layers, num_frames]
-% segmentation_data - Output from keyframeSegToolDualLabel_XYZT
-% label_idx - Which label to process (1 or 2)
-% output_dir - Dataset save directory
-% dataset_name - Dataset name
-% imageSize - Target image size [height, width]
-% Optional parameters (name-value pairs) - same as original buildDataset
+% Build grayscale normalized dataset for XYZT data with dual-label support and depth encoding
+% Modified to include depth information as additional channel
 
 % Parse input parameters
 p = inputParser;
@@ -20,6 +13,7 @@ addParameter(p, 'TranslationRange', [-10, 10], @(x) isnumeric(x) && length(x) ==
 addParameter(p, 'BrightnessRange', [-0.1, 0.1], @(x) isnumeric(x) && length(x) == 2);
 addParameter(p, 'ContrastRange', [0.9, 1.1], @(x) isnumeric(x) && length(x) == 2);
 addParameter(p, 'NoiseStd', 0.01, @(x) isnumeric(x) && x >= 0);
+addParameter(p, 'IncludeDepthChannel', true, @islogical);  % New parameter for depth encoding
 parse(p, varargin{:});
 opts = p.Results;
 
@@ -47,8 +41,8 @@ else
     error('label_idx must be 1 or 2');
 end
 
-segmented_frames = label_data.segmented_frames;  % [num_layers x num_frames]
-masks = label_data.masks;  % Cell array [num_layers x num_frames]
+segmented_frames = label_data.segmented_frames;
+masks = label_data.masks;
 
 % Get dimensions
 [height, width, num_layers, num_frames] = size(img_4d);
@@ -65,6 +59,9 @@ end
 
 fprintf('Label %d: Found %d segmented frames across %d layers, generating %d training samples\n', ...
         label_idx, total_segmented, num_layers, total_images);
+if opts.IncludeDepthChannel
+    fprintf('Including depth channel encoding in the dataset\n');
+end
 
 % Image counter
 img_counter = 1;
@@ -83,14 +80,17 @@ for layer_idx = 1:num_layers
                 continue;
             end
             
+            % Create depth encoding (normalized to [0,1])
+            depth_value = (layer_idx - 1) / (num_layers - 1);
+            
             % Preprocess: resize
             processed_img = rescale(double(current_img));
             processed_img = imresize(processed_img, imageSize(1:2), "bilinear");
             processed_mask = imresize(current_mask, imageSize(1:2), "nearest");
             
-            % Save original image
-            saveImageAndLabel(processed_img, processed_mask, ...
-                imageDir, labelDir, img_counter, imageSize);
+            % Save original image with depth
+            saveImageAndLabel(processed_img, processed_mask, depth_value, ...
+                imageDir, labelDir, img_counter, imageSize, opts.IncludeDepthChannel);
             img_counter = img_counter + 1;
             
             % Generate augmented images if enabled
@@ -98,9 +98,9 @@ for layer_idx = 1:num_layers
                 for aug_idx = 1:opts.AugmentationFactor
                     [aug_img, aug_mask] = applyDataAugmentation(processed_img, processed_mask, opts);
                     
-                    % Save augmented image
-                    saveImageAndLabel(aug_img, aug_mask, ...
-                        imageDir, labelDir, img_counter, imageSize);
+                    % Save augmented image with same depth
+                    saveImageAndLabel(aug_img, aug_mask, depth_value, ...
+                        imageDir, labelDir, img_counter, imageSize, opts.IncludeDepthChannel);
                     img_counter = img_counter + 1;
                 end
             end
@@ -150,6 +150,7 @@ dataset_info.num_segmented_frames = total_segmented;
 dataset_info.total_samples = img_counter - 1;
 dataset_info.augmentation_enabled = opts.EnableAugmentation;
 dataset_info.augmentation_factor = opts.AugmentationFactor;
+dataset_info.include_depth_channel = opts.IncludeDepthChannel;
 dataset_info.image_dir = imageDir;
 dataset_info.label_dir = labelDir;
 dataset_info.augmentation_params = opts;
@@ -166,17 +167,27 @@ fprintf('Total training samples: %d\n', img_counter - 1);
 reset(ds);
 
     % Nested helper functions
-    function saveImageAndLabel(img, mask, imageDir, labelDir, counter, imageSize)
+    function saveImageAndLabel(img, mask, depth_value, imageDir, labelDir, counter, imageSize, includeDepth)
         % Normalize image to [0,1]
         img_normalized = rescale(img);
         
+        if includeDepth
+            % Create depth channel - constant value across the image
+            depth_channel = ones(size(img_normalized)) * depth_value;
+            
+            % Stack image and depth channel
+            img_with_depth = cat(3, img_normalized, depth_channel);
+        else
+            img_with_depth = img_normalized;
+        end
+        
         % Generate filenames
-        img_filename = sprintf('frame_%06d.png', counter);
+        img_filename = sprintf('frame_%06d.mat', counter);  % Changed to .mat for multi-channel
         label_filename = sprintf('frame_%06d.png', counter);
         
-        % Save image
+        % Save image (as .mat for multi-channel support)
         img_path = fullfile(imageDir, img_filename);
-        imwrite(img_normalized, img_path);
+        save(img_path, 'img_with_depth');
         
         % Process mask: create binary labels (0 and 1)
         label_img = uint8(mask > 0);
@@ -211,7 +222,7 @@ reset(ds);
             end
         end
         
-        % 3. Brightness adjustment
+        % 3. Brightness adjustment (only on image channel, not depth)
         brightness_delta = opts.BrightnessRange(1) + ...
             (opts.BrightnessRange(2) - opts.BrightnessRange(1)) * rand;
         aug_img = aug_img + brightness_delta;

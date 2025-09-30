@@ -41,7 +41,7 @@ end
 
 %% Apply cropping (optional)
 % This will apply the same crop to all layers and frames
-crop_size = [100, 100];  % Define crop size
+crop_size = [128, 128];  % Define crop size
 config_file = fullfile(dataset_path, 'crop_config');
 
 % Select middle layer and middle frame as reference for cropping
@@ -149,10 +149,9 @@ end
 %      'segmentation_data', 'z_range', 'crop_params');
 
 %% GENERATE DATASETS FOR BOTH LABELS
-imageSize = [128, 128, 1];  % Target size for U-Net
+imageSize = [128, 128, 2];  % Target size for U-Net
 
-% Dataset for Label 1
-fprintf('\n=== Generating dataset for Label 1 ===\n');
+fprintf('\n=== Generating dataset for Label 1 with depth encoding ===\n');
 [dsTrain_label1, ~, ~] = buildDatasetXYZT(img_4d_cropped, segmentation_data, 1, ...
     fullfile(dataset_path, 'label1'), [base_dataset_name '_label1_XYZT'], imageSize, ...
     'EnableAugmentation', true, ...
@@ -163,10 +162,11 @@ fprintf('\n=== Generating dataset for Label 1 ===\n');
     'TranslationRange', [-7, 7], ...
     'BrightnessRange', [-0.1, 0.1], ...
     'ContrastRange', [0.85, 1.15], ...
-    'NoiseStd', 0);
+    'NoiseStd', 0, ...
+    'IncludeDepthChannel', true);  % Enable depth channel
 
-% Dataset for Label 2
-fprintf('\n=== Generating dataset for Label 2 ===\n');
+% Dataset for Label 2 with depth channel
+fprintf('\n=== Generating dataset for Label 2 with depth encoding ===\n');
 [dsTrain_label2, ~, ~] = buildDatasetXYZT(img_4d_cropped, segmentation_data, 2, ...
     fullfile(dataset_path, 'label2'), [base_dataset_name '_label2_XYZT'], imageSize, ...
     'EnableAugmentation', true, ...
@@ -177,62 +177,75 @@ fprintf('\n=== Generating dataset for Label 2 ===\n');
     'TranslationRange', [-7, 7], ...
     'BrightnessRange', [-0.1, 0.1], ...
     'ContrastRange', [0.85, 1.15], ...
-    'NoiseStd', 0);
+    'NoiseStd', 0, ...
+    'IncludeDepthChannel', true);  % Enable depth channel
 
-%% INITIALIZE AND TRAIN TWO U-NETS
+%% INITIALIZE AND TRAIN TWO U-NETS WITH 2-CHANNEL INPUT
 lr = 3e-5;
 
-% Initialize U-Net for Label 1
+% Initialize U-Net for Label 1 with 2 input channels
 unetNetwork_label1 = unet(imageSize, 2, EncoderDepth=3);
 
-% Initialize U-Net for Label 2
+% Initialize U-Net for Label 2 with 2 input channels
 unetNetwork_label2 = unet(imageSize, 2, EncoderDepth=3);
 
-% Define combined loss function
-function loss = diceCrossEntropyLoss(Y, T)
+% Define combined loss function with focal loss component
+function loss = diceFocalCrossEntropyLoss(Y, T)
     % Dice Loss part
     smooth = 1e-6;
     intersection = sum(Y .* T, [1,2]);
     dice_coeff = (2 * intersection + smooth) ./ (sum(Y, [1,2]) + sum(T, [1,2]) + smooth);
     dice_loss = 1 - mean(dice_coeff, 'all');
     
-    % Cross Entropy part
-    ce_loss = crossentropy(Y, T);
+    % Focal Cross Entropy part (helps with class imbalance)
+    alpha = 0.25;  % Weight for positive class
+    gamma = 2;     % Focusing parameter
     
-    % Combined loss (weighted)
-    loss = 0.7 * dice_loss + 0.3 * ce_loss;
+    % Convert to probabilities
+    pt = Y .* T + (1 - Y) .* (1 - T);
+    pt = max(pt, 1e-7);  % Avoid log(0)
+    
+    % Focal loss
+    focal_weight = (1 - pt).^gamma;
+    ce_loss = -mean(alpha * T .* focal_weight .* log(pt) + ...
+                    (1 - alpha) * (1 - T) .* focal_weight .* log(pt), 'all');
+    
+    % Combined loss (adjusted weights for focal loss)
+    loss = 0.6 * dice_loss + 0.4 * ce_loss;
 end
 
-% Training options
+
+% Training options with adjusted parameters
 options = trainingOptions("adam", ...
     InitialLearnRate=lr, ...
     LearnRateSchedule="piecewise", ...
     LearnRateDropFactor=0.5, ...
     LearnRateDropPeriod=100, ...
-    MaxEpochs=80, ...
-    MiniBatchSize=36, ...
+    MaxEpochs=100, ...  % Increased epochs
+    MiniBatchSize=32, ...  % Slightly reduced batch size
     Metrics = ["accuracy","fscore"], ...
+    L2Regularization=1e-4, ...  % Add regularization
     Verbose=false, ...
     Plots="training-progress");
 
 % Train U-Net for Label 1
-fprintf('\n=== Training U-Net for Label 1 ===\n');
+fprintf('\n=== Training U-Net for Label 1 with depth encoding ===\n');
 reset(dsTrain_label1);
-net_label1 = trainnet(dsTrain_label1, unetNetwork_label1, @diceCrossEntropyLoss, options);
-save(fullfile(dataset_path, 'label1', 'net_label1_XYZT.mat'), 'net_label1');
+net_label1 = trainnet(dsTrain_label1, unetNetwork_label1, @diceFocalCrossEntropyLoss, options);
+save(fullfile(dataset_path, 'label1', 'net_label1_XYZT_depth.mat'), 'net_label1');
 
 % Train U-Net for Label 2
-fprintf('\n=== Training U-Net for Label 2 ===\n');
+fprintf('\n=== Training U-Net for Label 2 with depth encoding ===\n');
 reset(dsTrain_label2);
-net_label2 = trainnet(dsTrain_label2, unetNetwork_label2, @diceCrossEntropyLoss, options);
-save(fullfile(dataset_path, 'label2', 'net_label2_XYZT.mat'), 'net_label2');
+net_label2 = trainnet(dsTrain_label2, unetNetwork_label2, @diceFocalCrossEntropyLoss, options);
+save(fullfile(dataset_path, 'label2', 'net_label2_XYZT_depth.mat'), 'net_label2');
 
 %% 5. LOAD EXISTING TRAINED NETWORKS (if already trained)
 % load(fullfile(dataset_path, 'label1', 'net_label1_XYZT.mat'));
 % load(fullfile(dataset_path, 'label2', 'net_label2_XYZT.mat'));
 
-%% 6. INFERENCE: TEST BOTH U-NETS ON ALL XYZT DATA
-fprintf('\n=== Running inference on XYZT data ===\n');
+%% 6. INFERENCE WITH DEPTH ENCODING AND BETTER POST-PROCESSING
+fprintf('\n=== Running inference on XYZT data with improved post-processing ===\n');
 
 % Get dimensions
 [height, width, num_layers, num_frames] = size(img_4d_cropped);
@@ -254,7 +267,10 @@ fprintf('Processing %d layers x %d frames = %d total frames\n', ...
 
 for layer_idx = 1:num_layers
     fprintf('\nProcessing layer %d/%d...\n', layer_idx, num_layers);
-    
+
+    % Calculate depth encoding for current layer
+    depth_value = (layer_idx - 1) / (num_layers - 1);
+
     for frame_idx = 1:num_frames
         frame_counter = frame_counter + 1;
         
@@ -268,33 +284,46 @@ for layer_idx = 1:num_layers
         
         % Preprocess for network input
         I = imresize(double(currentFrame), inputSize(1:2));
-        I = uint8(255 * rescale(I));
+        I = rescale(I);
+        % Create 2-channel input with depth encoding
+        depth_channel = ones(inputSize(1:2)) * depth_value;
+        I_with_depth = cat(3, I, depth_channel);
+        % Convert to uint8 for network (if needed)
+        I_with_depth = uint8(255 * I_with_depth);
         
         % Segment with Label 1 network
-        [C1, scores1] = semanticseg(I, net_label1, Classes = classes);
-        mask1 = C1 == "object";
+        [C1, scores1] = semanticseg(I_with_depth, net_label1, Classes = classes);
+        mask1_raw = C1 == "object";
         
-        % Morphological processing for Label 1
-        se_open = strel('disk', 1);
-        mask1 = imopen(mask1, se_open);
-        se_close = strel('disk', 3);
-        mask1 = imclose(mask1, se_close);
-        mask1 = bwareaopen(mask1, 3);
+        % Get confidence scores for better thresholding
+        confidence1 = scores1(:,:,1);  % Confidence for "object" class
+        confidence_threshold = 0.6;  % Adjust based on validation
+        mask1 = mask1_raw & (confidence1 > confidence_threshold);
+        % Enhanced morphological processing for Label 1
+        mask1 = morphoProcessing(mask1);
+        % Resize back to original size
+        mask1_resized = imresize(mask1, [height, width], 'nearest');
+        % Keep only the largest connected component (per label, there should be one main region)
+        mask1_final = keepLargestComponent(mask1_resized);
+        % Store result
+        all_masks_label1(:, :, layer_idx, frame_idx) = mask1_final;
         
-        % Resize back to original size and store
-        all_masks_label1(:, :, layer_idx, frame_idx) = imresize(mask1, [height, width], 'nearest');
         
         % Segment with Label 2 network
-        [C2, scores2] = semanticseg(I, net_label2, Classes = classes);
-        mask2 = C2 == "object";
-        
-        % Morphological processing for Label 2
-        mask2 = imopen(mask2, se_open);
-        mask2 = imclose(mask2, se_close);
-        mask2 = bwareaopen(mask2, 3);
-        
-        % Resize back to original size and store
-        all_masks_label2(:, :, layer_idx, frame_idx) = imresize(mask2, [height, width], 'nearest');
+        [C2, scores2] = semanticseg(I_with_depth, net_label2, Classes = classes);
+        mask2_raw = C2 == "object";
+
+        % Get confidence scores
+        confidence2 = scores2(:,:,1);
+        mask2 = mask2_raw & (confidence2 > confidence_threshold);
+        % Enhanced morphological processing for Label 2
+        mask2 = morphoProcessing(mask2);
+        % Resize back to original size
+        mask2_resized = imresize(mask2, [height, width], 'nearest');
+        % Keep only the largest connected component
+        mask2_final = keepLargestComponent(mask2_resized);
+        % Store result
+        all_masks_label2(:, :, layer_idx, frame_idx) = mask2_final;
     end
 end
 
@@ -312,26 +341,27 @@ for layer_idx = 1:num_layers
     layer_masks1 = squeeze(all_masks_label1(:, :, layer_idx, :));
     layer_masks2 = squeeze(all_masks_label2(:, :, layer_idx, :));
     
-    % Apply temporal smoothing (if you have pca_temporal_smoothing function)
-    if exist('pca_temporal_smoothing', 'file')
-        smoothed_masks_label1(:, :, layer_idx, :) = pca_temporal_smoothing(layer_masks1, 4, 3);
-        smoothed_masks_label2(:, :, layer_idx, :) = pca_temporal_smoothing(layer_masks2, 4, 3);
-    else
-        % Simple median filtering as alternative
-        for t = 1:num_frames
-            if t > 2 && t < num_frames-1
-                % Median filter across 5 frames
-                temp_window1 = all_masks_label1(:, :, layer_idx, t-2:t+2);
-                temp_window2 = all_masks_label2(:, :, layer_idx, t-2:t+2);
-                smoothed_masks_label1(:, :, layer_idx, t) = median(temp_window1, 4) > 0.5;
-                smoothed_masks_label2(:, :, layer_idx, t) = median(temp_window2, 4) > 0.5;
-            else
-                smoothed_masks_label1(:, :, layer_idx, t) = all_masks_label1(:, :, layer_idx, t);
-                smoothed_masks_label2(:, :, layer_idx, t) = all_masks_label2(:, :, layer_idx, t);
-            end
-        end
-    end
+    smoothed_masks_label1(:, :, layer_idx, :) = pca_temporal_smoothing(layer_masks1, 4, 3);
+    smoothed_masks_label2(:, :, layer_idx, :) = pca_temporal_smoothing(layer_masks2, 4, 3);
 end
+
+% % Final cleanup pass
+% fprintf('\nApplying final cleanup pass...\n');
+% for layer_idx = 1:num_layers
+%     for frame_idx = 1:num_frames
+%         % Remove small isolated regions
+%         smoothed_masks_label1(:, :, layer_idx, frame_idx) = ...
+%             bwareaopen(smoothed_masks_label1(:, :, layer_idx, frame_idx), 10);
+%         smoothed_masks_label2(:, :, layer_idx, frame_idx) = ...
+%             bwareaopen(smoothed_masks_label2(:, :, layer_idx, frame_idx), 10);
+% 
+%         % Fill holes
+%         smoothed_masks_label1(:, :, layer_idx, frame_idx) = ...
+%             imfill(smoothed_masks_label1(:, :, layer_idx, frame_idx), 'holes');
+%         smoothed_masks_label2(:, :, layer_idx, frame_idx) = ...
+%             imfill(smoothed_masks_label2(:, :, layer_idx, frame_idx), 'holes');
+%     end
+% end
 
 % SAVE RESULTS
 fprintf('\nSaving results...\n');
