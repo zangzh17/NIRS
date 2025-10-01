@@ -545,3 +545,237 @@ for i = 1:length(all_files)
     total_size = total_size + file_size_mb;
 end
 fprintf('Total size: %.1f MB\n', total_size);
+
+%% VENTRICULAR AREA ANALYSIS - TIME SERIES FOR ALL LAYERS
+fprintf('\n=== VENTRICULAR AREA ANALYSIS ===\n');
+
+% === Z-AXIS PARAMETERS (in micrometers) ===
+z_step_um = 30; % 0.03 mm = 30 µm
+z_coords_um = (0:(num_layers-1)) * z_step_um;
+
+% === OTHER PARAMETERS ===
+actual_frame_rate = 600;
+
+% Physical parameters
+ratio = target_resolution(1)/size(img,1);
+pixel_to_um_ratio = (2.4e-3 * 1000) / ratio; % Convert mm ratio to µm ratio
+area_unit = 'µm²'; % Updated area unit
+
+% Color schemes for the two ventricles
+color_ventricle1 = [1, 0, 0]; % Red for Label 1
+color_ventricle2 = [0, 0, 1]; % Blue for Label 2
+
+% === CALCULATE AREAS FOR ALL LAYERS AND FRAMES ===
+fprintf('Calculating areas for %d layers and %d frames...\n', num_layers, num_frames);
+% Initialize area arrays
+area_label1 = zeros(num_layers, num_frames);
+area_label2 = zeros(num_layers, num_frames);
+
+% Calculate areas for each layer and frame
+for layer_idx = 1:num_layers
+    for frame_idx = 1:num_frames
+        mask1 = smoothed_masks_label1(:, :, layer_idx, frame_idx);
+        mask2 = smoothed_masks_label2(:, :, layer_idx, frame_idx);
+        
+        area_label1(layer_idx, frame_idx) = sum(mask1(:)); 
+        area_label2(layer_idx, frame_idx) = sum(mask2(:));
+    end
+    
+    if mod(layer_idx, 10) == 0
+        fprintf('  Processed layer %d/%d\n', layer_idx, num_layers);
+    end
+end
+
+% Convert pixel areas to physical units (µm²)
+area_label1 = area_label1 * (pixel_to_um_ratio^2);
+area_label2 = area_label2 * (pixel_to_um_ratio^2);
+
+% === CREATE TIME AXIS ===
+time_per_frame = 1 / actual_frame_rate;
+time_axis = (0:num_frames-1) * time_per_frame;
+
+% === VISUALIZATION ===
+fprintf('\nCreating multi-layer area visualization...\n');
+fig = figure('Position', [100, 50, 1400, 900], 'Name', 'Ventricular Area Analysis');
+
+% === SUBPLOT 1: Ventricle 1 (Label 1) ===
+subplot(2, 2, 1);
+hold on;
+alpha_values = linspace(0.3, 1, num_layers);
+for layer_idx = 1:num_layers
+    layer_z_pos_um = z_coords_um(layer_idx); 
+    layer_color = color_ventricle1 * alpha_values(layer_idx);
+    
+    plot(time_axis, area_label1(layer_idx, :), ...
+         'Color', layer_color, ...
+         'LineWidth', 1.5, ...
+         'DisplayName', sprintf('Layer Z=%.0f µm', layer_z_pos_um));
+end
+xlabel('Time (seconds)', 'FontSize', 12);
+ylabel(sprintf('Area (%s)', area_unit), 'FontSize', 12);
+title('A (Red Label) - Area Over Time', 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+legend('Location', 'eastoutside', 'FontSize', 8);
+xlim([0, max(time_axis)]);
+
+% === SUBPLOT 2: Ventricle 2 (Label 2) ===
+subplot(2, 2, 2);
+hold on;
+for layer_idx = 1:num_layers
+    layer_z_pos_um = z_coords_um(layer_idx);
+    layer_color = color_ventricle2 * alpha_values(layer_idx);
+    
+    plot(time_axis, area_label2(layer_idx, :), ...
+         'Color', layer_color, ...
+         'LineWidth', 1.5, ...
+         'DisplayName', sprintf('Layer Z=%.0f µm', layer_z_pos_um));
+end
+xlabel('Time (seconds)', 'FontSize', 12);
+ylabel(sprintf('Area (%s)', area_unit), 'FontSize', 12);
+title('V (Blue Label) - Area Over Time', 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+legend('Location', 'eastoutside', 'FontSize', 8);
+xlim([0, max(time_axis)]);
+
+% === SUBPLOT 3: Combined View ===
+subplot(2, 2, [3, 4]);
+hold on;
+for layer_idx = 1:num_layers
+    layer_z_pos_um = z_coords_um(layer_idx); 
+    
+    % Ventricle 1 (Red shades)
+    layer_color1 = color_ventricle1 * alpha_values(layer_idx);
+    plot(time_axis, area_label1(layer_idx, :), ...
+              'Color', layer_color1, ...
+              'LineWidth', 2, ...
+              'LineStyle', '-', ...
+              'DisplayName', sprintf('A-Layer Z=%.0f µm', layer_z_pos_um));
+    
+    % Ventricle 2 (Blue shades)  
+    layer_color2 = color_ventricle2 * alpha_values(layer_idx);
+    plot(time_axis, area_label2(layer_idx, :), ...
+              'Color', layer_color2, ...
+              'LineWidth', 2, ...
+              'LineStyle', '--', ...
+              'DisplayName', sprintf('V-Layer Z=%.0f µm', layer_z_pos_um));
+end
+xlabel('Time (seconds)', 'FontSize', 12);
+ylabel(sprintf('Area (%s)', area_unit), 'FontSize', 12);
+title('Both - Area Over Time (All Layers)', 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+legend('Location', 'eastoutside', 'FontSize', 8, 'NumColumns', 2);
+xlim([0, max(time_axis)]);
+
+% Annotation
+annotation('textbox', [0.02, 0.02, 0.3, 0.05], ...
+           'String', sprintf('Frame Rate: %.1f Hz | Total Duration: %.2f s | Z-Step: %.0f µm', ...
+                            actual_frame_rate, max(time_axis), z_step_um), ...
+           'FontSize', 10, 'EdgeColor', 'none');
+
+% ---
+% === CREATE HEATMAP OF AREA CHANGES ===
+figure('Position', [100, 100, 1200, 500], 'Name', 'Area Heatmaps');
+z_tick_labels = arrayfun(@(x) sprintf('Z=%.0f µm', x), z_coords_um, 'UniformOutput', false);
+
+% Heatmap for Ventricle 1
+subplot(1, 2, 1);
+imagesc(time_axis, 1:num_layers, area_label1);
+colorbar;
+xlabel('Time (seconds)', 'FontSize', 12);
+ylabel(sprintf('Z Position (%s)', 'µm'), 'FontSize', 12); 
+title('A - Area Heatmap', 'FontSize', 14, 'FontWeight', 'bold');
+colormap(subplot(1, 2, 1), hot);
+yticks(1:num_layers);
+yticklabels(z_tick_labels); 
+
+% Heatmap for Ventricle 2
+subplot(1, 2, 2);
+imagesc(time_axis, 1:num_layers, area_label2);
+colorbar;
+xlabel('Time (seconds)', 'FontSize', 12);
+ylabel(sprintf('Z Position (%s)', 'µm'), 'FontSize', 12); 
+title('V - Area Heatmap', 'FontSize', 14, 'FontWeight', 'bold');
+colormap(subplot(1, 2, 2), hot);
+yticks(1:num_layers);
+yticklabels(z_tick_labels);
+
+%% === STATISTICAL ANALYSIS ===
+fprintf('\n=== AREA STATISTICS ===\n');
+
+% Calculate statistics for each ventricle and layer
+for ventricle_idx = 1:2
+    if ventricle_idx == 1
+        area_data = area_label1;
+        ventricle_name = 'Ventricle 1 (Red)';
+    else
+        area_data = area_label2;
+        ventricle_name = 'Ventricle 2 (Blue)';
+    end
+    
+    fprintf('\n%s:\n', ventricle_name);
+    fprintf('%-10s %-15s %-15s %-15s %-15s %-15s\n', ...
+            'Layer', 'Mean Area', 'Std Dev', 'Min Area', 'Max Area', 'Range');
+    fprintf('%-10s %-15s %-15s %-15s %-15s %-15s\n', ...
+            '-----', '---------', '-------', '--------', '--------', '-----');
+    
+    for layer_idx = 1:num_layers
+        layer_z_pos = layer_idx + z_range(1) - 1;
+        layer_areas = area_data(layer_idx, :);
+        
+        mean_area = mean(layer_areas);
+        std_area = std(layer_areas);
+        min_area = min(layer_areas);
+        max_area = max(layer_areas);
+        range_area = max_area - min_area;
+        
+        fprintf('Z=%-8d %-15.2f %-15.2f %-15.2f %-15.2f %-15.2f\n', ...
+                layer_z_pos, mean_area, std_area, min_area, max_area, range_area);
+    end
+end
+
+% === PULSATION ANALYSIS ===
+fprintf('\n=== PULSATION ANALYSIS ===\n');
+
+% Calculate pulsation metrics
+for ventricle_idx = 1:2
+    if ventricle_idx == 1
+        area_data = area_label1;
+        ventricle_name = 'Ventricle 1';
+    else
+        area_data = area_label2;
+        ventricle_name = 'Ventricle 2';
+    end
+    
+    fprintf('\n%s Pulsation Metrics:\n', ventricle_name);
+    
+    for layer_idx = 1:num_layers
+        layer_z_pos = layer_idx + z_range(1) - 1;
+        layer_areas = area_data(layer_idx, :);
+        
+        % Calculate ejection fraction surrogate (simplified)
+        max_area = max(layer_areas);
+        min_area = min(layer_areas);
+        if max_area > 0
+            ejection_fraction = (max_area - min_area) / max_area * 100;
+        else
+            ejection_fraction = 0;
+        end
+        
+        % Find peaks (systole) and valleys (diastole)
+        [peaks, peak_locs] = findpeaks(layer_areas, 'MinPeakDistance', 5);
+        [valleys, valley_locs] = findpeaks(-layer_areas, 'MinPeakDistance', 5);
+        valleys = -valleys;
+        
+        if ~isempty(peak_locs) && length(peak_locs) > 1
+            % Calculate heart rate from peak intervals
+            peak_intervals = diff(peak_locs) * time_per_frame; % in seconds
+            heart_rate = 60 / mean(peak_intervals); % beats per minute
+            
+            fprintf('  Layer Z=%d: EF≈%.1f%%, HR≈%.1f bpm, Peaks=%d\n', ...
+                    layer_z_pos, ejection_fraction, heart_rate, length(peaks));
+        else
+            fprintf('  Layer Z=%d: EF≈%.1f%%, Insufficient peaks for HR\n', ...
+                    layer_z_pos, ejection_fraction);
+        end
+    end
+end
